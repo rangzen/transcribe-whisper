@@ -5,15 +5,63 @@ import os
 
 AUDIO_EXTENSIONS = {".mp3", ".mp4", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".webm", ".mkv", ".avi", ".mov"}
 
-def transcribe_audio(file_path, model_name, model=None):
-    """
-    Transcribes an audio file using OpenAI Whisper.
+def get_hf_token(cli_token):
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    return cli_token or os.environ.get("HF_TOKEN")
 
-    Args:
-        file_path (str): The path to the audio file.
-        model_name (str): The name of the Whisper model to use.
-        model: An already-loaded Whisper model (optional, avoids reloading).
-    """
+def run_diarization(file_path, hf_token):
+    try:
+        from pyannote.audio import Pipeline
+    except ImportError:
+        print("Error: pyannote.audio is required for diarization. Install with: uv sync --extra diarize")
+        raise SystemExit(1)
+    import torch
+
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1",
+        use_auth_token=hf_token,
+    )
+    if torch.cuda.is_available():
+        pipeline = pipeline.to(torch.device("cuda"))
+
+    return pipeline(file_path)
+
+def assign_speakers(segments, diarization):
+    labeled = []
+    for segment in segments:
+        mid = (segment["start"] + segment["end"]) / 2
+        speaker = "UNKNOWN"
+        for turn, _, label in diarization.itertracks(yield_label=True):
+            if turn.start <= mid <= turn.end:
+                speaker = label
+                break
+        labeled.append({"speaker": speaker, "text": segment["text"].strip()})
+    return labeled
+
+def format_diarized(labeled_segments):
+    lines = []
+    current_speaker = None
+    buffer = []
+
+    for seg in labeled_segments:
+        if seg["speaker"] != current_speaker:
+            if current_speaker is not None:
+                lines.append(f"[{current_speaker}] {' '.join(buffer)}")
+            current_speaker = seg["speaker"]
+            buffer = [seg["text"]]
+        else:
+            buffer.append(seg["text"])
+
+    if current_speaker is not None:
+        lines.append(f"[{current_speaker}] {' '.join(buffer)}")
+
+    return "\n".join(lines)
+
+def transcribe_audio(file_path, model_name, model=None, diarize=False, hf_token=None):
     if model is None:
         print(f"Loading Whisper model '{model_name}'...")
         model = whisper.load_model(model_name)
@@ -21,15 +69,22 @@ def transcribe_audio(file_path, model_name, model=None):
     print(f"Transcribing {file_path}...")
     result = model.transcribe(file_path, verbose=True)
 
+    if diarize:
+        print("Running speaker diarization...")
+        diarization = run_diarization(file_path, hf_token)
+        text = format_diarized(assign_speakers(result["segments"], diarization))
+    else:
+        text = result["text"]
+
     base_name = os.path.splitext(file_path)[0]
     output_path = base_name + ".txt"
 
     with open(output_path, "w") as f:
-        f.write(result["text"])
+        f.write(text)
 
     print(f"Transcription saved to {output_path}")
 
-def transcribe_directory(dir_path, model_name):
+def transcribe_directory(dir_path, model_name, diarize=False, hf_token=None):
     audio_files = [
         os.path.join(dir_path, f)
         for f in sorted(os.listdir(dir_path))
@@ -57,18 +112,29 @@ def transcribe_directory(dir_path, model_name):
     model = whisper.load_model(model_name)
 
     for file_path in pending:
-        transcribe_audio(file_path, model_name, model=model)
+        transcribe_audio(file_path, model_name, model=model, diarize=diarize, hf_token=hf_token)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Transcribe an audio file or directory using OpenAI Whisper.")
     parser.add_argument("file", type=str, help="Path to an audio file or a directory of audio files.")
-    parser.add_argument("--model", type=str, default="base", help="The name of the Whisper model to use (e.g., tiny, base, small, medium, large).")
+    parser.add_argument("--model", type=str, default="base", help="Whisper model to use (tiny, base, small, medium, large).")
+    parser.add_argument("--diarize", action="store_true", help="Label speakers in the output (requires pyannote.audio and HF_TOKEN).")
+    parser.add_argument("--hf-token", type=str, help="HuggingFace token (or set HF_TOKEN in .env).")
 
     args = parser.parse_args()
 
     if not os.path.exists(args.file):
         print(f"Error: Path not found at {args.file}")
-    elif os.path.isdir(args.file):
-        transcribe_directory(args.file, args.model)
+        raise SystemExit(1)
+
+    hf_token = None
+    if args.diarize:
+        hf_token = get_hf_token(args.hf_token)
+        if not hf_token:
+            print("Error: --diarize requires a HuggingFace token. Set HF_TOKEN in .env or pass --hf-token.")
+            raise SystemExit(1)
+
+    if os.path.isdir(args.file):
+        transcribe_directory(args.file, args.model, diarize=args.diarize, hf_token=hf_token)
     else:
-        transcribe_audio(args.file, args.model)
+        transcribe_audio(args.file, args.model, diarize=args.diarize, hf_token=hf_token)
