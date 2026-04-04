@@ -16,10 +16,14 @@ uv sync
 ## Usage
 
 ```bash
+# Transcribe a single file
 uv run python transcribe.py <audio_file> [--model MODEL]
+
+# Transcribe all audio files in a directory (skips already-transcribed files)
+uv run python transcribe.py <directory> [--model MODEL]
 ```
 
-The transcription is saved as a `.txt` file next to the input file.
+The transcription is saved as a `.txt` file next to each input file.
 
 ### Models
 
@@ -31,9 +35,14 @@ The transcription is saved as a `.txt` file next to the input file.
 | medium | ~769M |                              |
 | large  | ~1.5G | Most accurate, slowest       |
 
-### Example
+### Examples
 
 ```bash
+# Single file
 uv run python transcribe.py interview.mp3 --model small
 # Output: interview.txt
+
+# Whole directory (model loaded once, files processed sequentially)
+uv run python transcribe.py ./recordings --model small
+# Output: ./recordings/file1.txt, ./recordings/file2.txt, ...
 ```
